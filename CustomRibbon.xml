@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="RibbonOnLoad">
+  <ribbon>
+    <tabs>
+      <tab id="BASHFlowTab" label="BASH Flow Management" insertAfterMso="TabMail">
+        <group id="BASHFlowGroup" label="Workflow Operations">
+          <button id="ProcessEmailsBtn" 
+                  label="Process Workflow Emails" 
+                  size="large" 
+                  imageMso="MailMergeGoToFirstRecord" 
+                  onAction="ProcessWorkflowEmailsRibbon"
+                  screentip="Process all workflow emails from inbox"
+                  supertip="Automatically processes emails with CLLI, MS, and Event subject line formats and populates the database"/>
+          
+          <button id="ShowFormatsBtn" 
+                  label="Show Format Examples" 
+                  size="large" 
+                  imageMso="Help" 
+                  onAction="ShowFormatExamplesRibbon"
+                  screentip="Display valid subject line formats"
+                  supertip="Shows examples of valid CLLI, MS, and Event subject line formats"/>
+          
+          <button id="TestDBBtn" 
+                  label="Test Database" 
+                  size="large" 
+                  imageMso="DatabaseConnect" 
+                  onAction="TestDatabaseConnectionRibbon"
+                  screentip="Test database connection"
+                  supertip="Tests the connection to the workflow database"/>
+        </group>
+        
+        <group id="BASHFlowSetupGroup" label="Setup &amp; Maintenance">
+          <button id="CreateTableBtn" 
+                  label="Create Database Table" 
+                  size="large" 
+                  imageMso="CreateTableFromDataTable" 
+                  onAction="CreateDatabaseTableRibbon"
+                  screentip="Create workflow database table"
+                  supertip="Creates the required database table for workflow tracking (run once for setup)"/>
+          
+          <button id="GenerateSampleBtn" 
+                  label="Generate Sample Data" 
+                  size="large" 
+                  imageMso="DataValidation" 
+                  onAction="GenerateSampleDataRibbon"
+                  screentip="Generate sample subject lines"
+                  supertip="Generates sample subject lines for testing the workflow system"/>
+          
+          <button id="ViewLogBtn" 
+                  label="View Log File" 
+                  size="large" 
+                  imageMso="FileOpen" 
+                  onAction="ViewLogFile"
+                  screentip="Open workflow log file"
+                  supertip="Opens the workflow log file to view processing history and errors"/>
+        </group>
+        
+        <group id="BASHFlowStatusGroup" label="Status &amp; Reports">
+          <button id="WorkflowStatusBtn" 
+                  label="Workflow Status" 
+                  size="large" 
+                  imageMso="ChartColumn" 
+                  onAction="ShowWorkflowStatus"
+                  screentip="Show workflow processing status"
+                  supertip="Displays current workflow processing statistics and recent activity"/>
+          
+          <button id="ExportDataBtn" 
+                  label="Export Data" 
+                  size="large" 
+                  imageMso="ExportExcel" 
+                  onAction="ExportWorkflowData"
+                  screentip="Export workflow data to Excel"
+                  supertip="Exports workflow data from database to Excel for analysis"/>
+          
+          <separator id="BASHFlowSeparator1"/>
+          
+          <labelControl id="BASHFlowStatusLabel" 
+                        label="Ready for Processing" 
+                        getLabel="GetStatusLabel"/>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
