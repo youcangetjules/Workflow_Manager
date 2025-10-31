@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+from db_config import get_database_connection
 
 @dataclass
 class ValidationResult:
@@ -38,8 +39,9 @@ class DatabaseRecord:
     created_date: str
 
 class EmailProcessor:
-    def __init__(self, db_path: str = r"C:\BASHFlowSandbox\TestDatabase.accdb"):
-        self.db_path = db_path
+    def __init__(self, config_file: str = "config.json"):
+        self.config_file = config_file
+        self.db_conn = get_database_connection(config_file)
         self.patterns = {
             'CLLI': r'^(CLLI)-(\d{4})-(\d{4}-\d{2}-\d{2})-(.+)$',
             'MS': r'^(MS)-(\d{4})-(\d{4}-\d{2}-\d{2})-(.+)$',
@@ -123,32 +125,30 @@ class EmailProcessor:
     def save_to_database(self, record: DatabaseRecord) -> bool:
         """Save record to database"""
         try:
-            # For Access database, we'll use a different approach
-            # This is a simplified version - you might need pyodbc for Access
-            conn = sqlite3.connect(self.db_path.replace('.accdb', '.db'))
+            conn = self.db_conn.connect()
             cursor = conn.cursor()
             
             # Create table if it doesn't exist
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS BASHFlowSandbox (
-                    ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Subject TEXT,
-                    RecordType TEXT,
-                    CLLINumber TEXT,
-                    MSNumber TEXT,
-                    EventNumber TEXT,
-                    RecordDate TEXT,
+                    ID INT AUTO_INCREMENT PRIMARY KEY,
+                    Subject VARCHAR(255),
+                    RecordType VARCHAR(50),
+                    CLLINumber VARCHAR(20),
+                    MSNumber VARCHAR(20),
+                    EventNumber VARCHAR(20),
+                    RecordDate VARCHAR(20),
                     Description TEXT,
-                    Status TEXT,
-                    CreatedDate TEXT
-                )
+                    Status VARCHAR(50),
+                    CreatedDate DATETIME
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
             cursor.execute("""
                 INSERT INTO BASHFlowSandbox 
                 (Subject, RecordType, CLLINumber, MSNumber, EventNumber, 
                  RecordDate, Description, Status, CreatedDate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 record.subject, record.record_type, record.clli_number,
                 record.ms_number, record.event_number, record.record_date,
@@ -156,6 +156,7 @@ class EmailProcessor:
             ))
             
             conn.commit()
+            cursor.close()
             conn.close()
             return True
         except Exception as e:

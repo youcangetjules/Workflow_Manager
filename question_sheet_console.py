@@ -11,6 +11,7 @@ from datetime import datetime, date
 from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict
 import os
+from db_config import get_database_connection
 
 @dataclass
 class QuestionSheetEntry:
@@ -21,8 +22,9 @@ class QuestionSheetEntry:
     created_date: datetime
 
 class QuestionSheetConsole:
-    def __init__(self, db_path: str = r"C:\BASHFlowSandbox\TestDatabase.accdb"):
-        self.db_path = db_path
+    def __init__(self, config_file: str = "config.json"):
+        self.config_file = config_file
+        self.db_conn = get_database_connection(config_file)
         self.states = self._initialize_states()
         self.stages = self._initialize_stages()
         self.statuses = self._initialize_statuses()

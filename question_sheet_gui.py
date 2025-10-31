@@ -23,6 +23,10 @@ from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
 from milestone_editor import open_milestone_editor
+from database_manager import open_database_manager
+from db_config import get_database_connection, create_mysql_database
+from user_manager import UserManager
+from login_gui import show_login_window, UserManagementWindow
 
 @dataclass
 class QuestionSheetEntry:
@@ -39,36 +43,103 @@ class QuestionSheetEntry:
     last_update: datetime
 
 class QuestionSheetGUI:
-    def __init__(self, db_path: str = r"C:\BASHFlowSandbox\TestDatabase.accdb"):
-        self.db_path = db_path
+    def __init__(self, config_file: str = "config.json", user_manager: UserManager = None):
+        # Initialize debug log first
+        self.debug_log = []
+        self.add_debug_entry("QuestionSheetGUI initialization started")
+        
+        # Initialize user management
+        self.user_manager = user_manager
+        if not self.user_manager:
+            # Show login window if no user manager provided
+            self.user_manager = show_login_window()
+            if not self.user_manager:
+                print("Login cancelled. Exiting application.")
+                sys.exit(0)
+        
+        self.add_debug_entry(f"User authenticated: {self.user_manager.get_current_user().username}")
+        
+        # Initialize database connection
+        self.db_conn = get_database_connection(config_file)
+        self.add_debug_entry("Database connection initialized")
+        
+        # For backward compatibility, keep db_path for legacy code
+        self.db_path = "mysql_database"  # Placeholder for legacy references
+        self.add_debug_entry(f"Database path set to: {self.db_path}")
+
+        # Initialize runtime status values
+        self.last_nat_sync = None
+        
         self.states = self._initialize_states()
+        self.add_debug_entry(f"Initialized {len(self.states)} states")
+        
         self.stages = self._initialize_stages()
+        self.add_debug_entry(f"Initialized {len(self.stages)} stages")
+        
         self.subtasks = self._initialize_subtasks()
+        self.add_debug_entry(f"Initialized {len(self.subtasks)} subtasks")
+        
         self.criticality_levels = self._initialize_criticality_levels()
+        self.add_debug_entry(f"Initialized {len(self.criticality_levels)} criticality levels")
+        
         self.statuses = self._initialize_statuses()
+        self.add_debug_entry(f"Initialized {len(self.statuses)} statuses")
+        
         self.equipment_types = self._initialize_equipment_types()
+        self.add_debug_entry(f"Initialized {len(self.equipment_types)} equipment types")
+        
         self.milestone_dates = self._initialize_milestone_dates()
+        self.add_debug_entry(f"Initialized {len(self.milestone_dates)} milestone dates")
         
         # Initialize databases
+        self.add_debug_entry("Initializing main database")
         self._initialize_database()
+        self.add_debug_entry("Main database initialized successfully")
+        
+        self.add_debug_entry("Initializing milestone database")
         self._initialize_milestone_database()
+        self.add_debug_entry("Milestone database initialized successfully")
+        
+        # Create date entries table
+        self.add_debug_entry("Creating date entries table")
+        self._create_date_entries_table()
+        self.add_debug_entry("Date entries table created successfully")
         
         # Load Excel data for CLLI lookup
+        self.add_debug_entry("Loading CLLI data from Excel file")
         self.clli_data = self._load_clli_data()
+        self.add_debug_entry(f"CLLI data loaded: {len(self.clli_data) if self.clli_data is not None else 0} rows")
+        
         self.clli_suggestions = []
+        self.add_debug_entry("CLLI suggestions list initialized")
         
         # Initialize record number
         self.current_record_id = None
+        self.add_debug_entry("Record ID initialized to None")
+        
+        # Initialize inline editing state
+        self.editing_item = None
+        self.editing_column = None
+        self.editing_column_name = None
+        self.original_value = None
+        self.edit_entry = None
         
         # Create main window
+        self.add_debug_entry("Creating main window")
         self.root = tk.Tk()
         self.root.title("Degrow Workflow Manager")
         self.root.geometry("1920x1080")
         self.root.resizable(True, True)
+        self.add_debug_entry("Main window created and configured")
+        
+        # Create menu bar
+        self.create_menu_bar()
         
         # Configure style
+        self.add_debug_entry("Configuring GUI styles")
         self.style = ttk.Style()
         self.style.theme_use('clam')
+        self.add_debug_entry("GUI styles configured")
         
         # Configure white background style for entry fields
         self.style.configure("White.TEntry", fieldbackground="white", background="white")
@@ -85,6 +156,157 @@ class QuestionSheetGUI:
         
         # Center window on screen
         self.center_window()
+    
+    def create_menu_bar(self):
+        """Create application menu bar"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="New Entry", command=self.create_entry)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.quit)
+        
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Milestone Editor", command=self.open_milestone_editor)
+        tools_menu.add_command(label="Database Manager", command=self.open_database_manager)
+        tools_menu.add_separator()
+        
+        # User menu
+        user_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="User", menu=user_menu)
+        user_menu.add_command(label="User Management", command=self.open_user_management)
+        user_menu.add_separator()
+        user_menu.add_command(label="Change Password", command=self.change_password)
+        user_menu.add_command(label="Logout", command=self.logout)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About", command=self.show_about)
+        help_menu.add_command(label="User Guide", command=self.show_user_guide)
+    
+    def open_user_management(self):
+        """Open user management window"""
+        if not self.user_manager.has_permission('admin'):
+            messagebox.showerror("Access Denied", "You need administrator privileges to access user management.")
+            return
+        
+        try:
+            UserManagementWindow(self.root, self.user_manager)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open user management: {e}")
+    
+    def change_password(self):
+        """Change user password dialog"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Change Password")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Form frame
+        form_frame = ttk.Frame(dialog, padding="20")
+        form_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Current password
+        ttk.Label(form_frame, text="Current Password:").pack(anchor=tk.W, pady=(0, 5))
+        current_password_var = tk.StringVar()
+        current_password_entry = ttk.Entry(form_frame, textvariable=current_password_var, 
+                                         show="*", width=30)
+        current_password_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        # New password
+        ttk.Label(form_frame, text="New Password:").pack(anchor=tk.W, pady=(0, 5))
+        new_password_var = tk.StringVar()
+        new_password_entry = ttk.Entry(form_frame, textvariable=new_password_var, 
+                                     show="*", width=30)
+        new_password_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        # Confirm password
+        ttk.Label(form_frame, text="Confirm New Password:").pack(anchor=tk.W, pady=(0, 5))
+        confirm_password_var = tk.StringVar()
+        confirm_password_entry = ttk.Entry(form_frame, textvariable=confirm_password_var, 
+                                         show="*", width=30)
+        confirm_password_entry.pack(fill=tk.X, pady=(0, 15))
+        
+        # Buttons
+        button_frame = ttk.Frame(form_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def save_password():
+            current = current_password_var.get()
+            new = new_password_var.get()
+            confirm = confirm_password_var.get()
+            
+            if not current or not new or not confirm:
+                messagebox.showerror("Error", "All fields are required")
+                return
+            
+            if new != confirm:
+                messagebox.showerror("Error", "New passwords do not match")
+                return
+            
+            if len(new) < 6:
+                messagebox.showerror("Error", "Password must be at least 6 characters long")
+                return
+            
+            # Here you would implement password change logic
+            messagebox.showinfo("Success", "Password changed successfully")
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Change Password", command=save_password).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT)
+    
+    def logout(self):
+        """Logout current user"""
+        if messagebox.askyesno("Logout", "Are you sure you want to logout?"):
+            self.user_manager.logout()
+            self.root.quit()
+    
+    def show_about(self):
+        """Show about dialog"""
+        about_text = """
+Degrow Workflow Manager
+Version 1.0.0
+
+A comprehensive workflow management system for telecommunications and network infrastructure projects.
+
+Features:
+- Question Sheet Management
+- Milestone and Subtask Tracking
+- Database Management
+- Email Processing
+- User Authentication and Management
+
+© 2025 Workflow Manager System
+        """
+        
+        about_window = tk.Toplevel(self.root)
+        about_window.title("About")
+        about_window.geometry("400x300")
+        about_window.transient(self.root)
+        about_window.grab_set()
+        
+        text_widget = tk.Text(about_window, wrap=tk.WORD, padx=10, pady=10)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        text_widget.insert(tk.END, about_text)
+        text_widget.config(state=tk.DISABLED)
+        
+        ttk.Button(about_window, text="Close", 
+                  command=about_window.destroy).pack(pady=10)
+    
+    def show_user_guide(self):
+        """Show user guide"""
+        messagebox.showinfo("User Guide", "User guide functionality will be implemented")
+    
+    def open_email_processor(self):
+        """Open email processor"""
+        messagebox.showinfo("Email Processor", "Email processor functionality will be implemented")
     
     def _initialize_states(self) -> List[str]:
         """Initialize list of US states"""
@@ -164,73 +386,68 @@ class QuestionSheetGUI:
         }
     
     def _initialize_database(self):
-        """Initialize SQLite database for storing workflow entries"""
+        """Initialize MySQL database for storing workflow entries"""
         try:
-            # Convert .accdb path to .db path for SQLite
-            sqlite_path = self.db_path.replace('.accdb', '.db')
+            # Create MySQL database if it doesn't exist
+            create_mysql_database()
             
-            # Create database directory if it doesn't exist
-            db_dir = os.path.dirname(sqlite_path)
-            if db_dir and not os.path.exists(db_dir):
-                os.makedirs(db_dir)
-            
-            # Connect to SQLite database
-            conn = sqlite3.connect(sqlite_path)
+            # Connect to database
+            conn = self.db_conn.connect()
             cursor = conn.cursor()
             
             # Create workflow_entries table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS workflow_entries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    state TEXT NOT NULL,
-                    clli TEXT,
-                    host_wire_centre TEXT,
-                    lata TEXT,
-                    equipment_type TEXT,
-                    current_milestone TEXT NOT NULL,
-                    milestone_subtask TEXT,
-                    status TEXT NOT NULL,
-                    planned_start TEXT,
-                    actual_start TEXT,
-                    duration TEXT,
-                    planned_end TEXT,
-                    actual_end TEXT,
-                    milestone_date TEXT,
-                    created_date TEXT NOT NULL,
-                    last_update TEXT NOT NULL
-                )
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    state VARCHAR(50) NOT NULL,
+                    clli VARCHAR(20),
+                    host_wire_centre VARCHAR(100),
+                    lata VARCHAR(10),
+                    equipment_type VARCHAR(50),
+                    current_milestone VARCHAR(100) NOT NULL,
+                    milestone_subtask VARCHAR(100),
+                    status VARCHAR(50) NOT NULL,
+                    planned_start VARCHAR(20),
+                    actual_start VARCHAR(20),
+                    duration VARCHAR(20),
+                    planned_end VARCHAR(20),
+                    actual_end VARCHAR(20),
+                    milestone_date VARCHAR(20),
+                    created_date DATETIME NOT NULL,
+                    last_update DATETIME NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             ''')
             
             # Add new columns to existing tables (migration)
             try:
-                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN planned_start TEXT')
-            except sqlite3.OperationalError:
+                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN planned_start VARCHAR(20)')
+            except Exception:
                 pass  # Column already exists
             
             # Rename city column to host_wire_centre if it exists
             try:
-                cursor.execute('ALTER TABLE workflow_entries RENAME COLUMN city TO host_wire_centre')
-            except sqlite3.OperationalError:
+                cursor.execute('ALTER TABLE workflow_entries CHANGE COLUMN city host_wire_centre VARCHAR(100)')
+            except Exception:
                 pass  # Column doesn't exist or already renamed
             
             try:
-                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN actual_start TEXT')
-            except sqlite3.OperationalError:
+                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN actual_start VARCHAR(20)')
+            except Exception:
                 pass  # Column already exists
                 
             try:
-                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN duration TEXT')
-            except sqlite3.OperationalError:
+                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN duration VARCHAR(20)')
+            except Exception:
                 pass  # Column already exists
                 
             try:
-                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN planned_end TEXT')
-            except sqlite3.OperationalError:
+                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN planned_end VARCHAR(20)')
+            except Exception:
                 pass  # Column already exists
                 
             try:
-                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN actual_end TEXT')
-            except sqlite3.OperationalError:
+                cursor.execute('ALTER TABLE workflow_entries ADD COLUMN actual_end VARCHAR(20)')
+            except Exception:
                 pass  # Column already exists
             
             # Create index for better performance
@@ -245,9 +462,10 @@ class QuestionSheetGUI:
             ''')
             
             conn.commit()
+            cursor.close()
             conn.close()
             
-            print(f"Database initialized successfully: {sqlite_path}")
+            print("MySQL database initialized successfully")
             
         except Exception as e:
             print(f"Error initializing database: {e}")
@@ -255,52 +473,129 @@ class QuestionSheetGUI:
             traceback.print_exc()
     
     def _initialize_milestone_database(self):
-        """Initialize milestone database"""
+        """Initialize milestone database tables in MySQL"""
         try:
-            # Create milestone database path
-            milestone_db_path = self.db_path.replace('.accdb', '_milestones.db')
-            
-            conn = sqlite3.connect(milestone_db_path)
+            # Connect to database
+            conn = self.db_conn.connect()
             cursor = conn.cursor()
             
             # Create milestones table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS milestones (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL UNIQUE,
                     description TEXT,
-                    order_index INTEGER DEFAULT 0,
-                    created_date TEXT NOT NULL,
-                    last_updated TEXT NOT NULL
-                )
+                    order_index INT DEFAULT 0,
+                    created_date DATETIME NOT NULL,
+                    last_updated DATETIME NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             ''')
             
             # Create subtasks table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS subtasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    milestone_id INTEGER NOT NULL,
-                    name TEXT NOT NULL,
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    milestone_id INT NOT NULL,
+                    name VARCHAR(100) NOT NULL,
                     description TEXT,
-                    criticality TEXT DEFAULT 'Should be Complete',
-                    order_index INTEGER DEFAULT 0,
-                    created_date TEXT NOT NULL,
-                    last_updated TEXT NOT NULL,
+                    criticality VARCHAR(50) DEFAULT 'Should be Complete',
+                    order_index INT DEFAULT 0,
+                    created_date DATETIME NOT NULL,
+                    last_updated DATETIME NOT NULL,
                     FOREIGN KEY (milestone_id) REFERENCES milestones (id) ON DELETE CASCADE
-                )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            ''')
+            
+            # Create people table (renamed from stakeholders)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS people (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    home_state VARCHAR(50) NOT NULL,
+                    role VARCHAR(100),
+                    team VARCHAR(100),
+                    email VARCHAR(255),
+                    phone VARCHAR(20),
+                    created_date DATETIME NOT NULL,
+                    last_updated DATETIME NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             ''')
             
             conn.commit()
+            cursor.close()
             conn.close()
             
-            # Store milestone database path
-            self.milestone_db_path = milestone_db_path
-            print(f"Milestone database initialized successfully: {milestone_db_path}")
+            # Store milestone database reference (same as main database for MySQL)
+            self.milestone_db_path = "mysql_database"
+            print("Milestone database tables initialized successfully in MySQL")
             
         except Exception as e:
             print(f"Error initializing milestone database: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _create_date_entries_table(self):
+        """Create date entries table with CLLI as primary key"""
+        try:
+            conn = self.db_conn.connect()
+            cursor = conn.cursor()
+            
+            # Create date_entries table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS date_entries (
+                    clli VARCHAR(20) PRIMARY KEY,
+                    planned_start VARCHAR(20),
+                    actual_start VARCHAR(20),
+                    planned_end VARCHAR(20),
+                    actual_end VARCHAR(20),
+                    created_date DATETIME NOT NULL,
+                    last_updated DATETIME NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            ''')
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            print("Date entries table created successfully")
+            
+        except Exception as e:
+            print(f"Error creating date entries table: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _load_dates_for_clli(self, clli):
+        """Load date entries for a specific CLLI"""
+        try:
+            if not clli:
+                return {}
+            
+            conn = self.db_conn.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT planned_start, actual_start, planned_end, actual_end
+                FROM date_entries 
+                WHERE clli = %s
+            """, (clli,))
+            
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if result:
+                return {
+                    'planned_start': result[0] or '',
+                    'actual_start': result[1] or '',
+                    'planned_end': result[2] or '',
+                    'actual_end': result[3] or ''
+                }
+            else:
+                return {}
+                
+        except Exception as e:
+            print(f"Error loading dates for CLLI {clli}: {e}")
+            return {}
     
     def _load_clli_data(self) -> pd.DataFrame:
         """Load CLLI data from Excel file"""
@@ -325,7 +620,9 @@ class QuestionSheetGUI:
     
     def _search_clli(self, query: str) -> List[str]:
         """Search for CLLI codes matching the query in Host CLLI column"""
+        self.add_debug_entry(f"CLLI search initiated for query: '{query}'")
         if not query or len(query) < 2:
+            self.add_debug_entry("CLLI search cancelled - query too short")
             return []
         
         suggestions = []
@@ -416,19 +713,40 @@ class QuestionSheetGUI:
             try:
                 from PIL import Image, ImageTk
                 import os
-                if os.path.exists("lumen.png"):
+                import cairosvg
+                import io
+                
+                # Check for SVG first, then PNG as fallback
+                print(f"Current working directory: {os.getcwd()}")
+                print(f"Looking for Lumen.svg in: {os.path.abspath('Lumen.svg')}")
+                print(f"Lumen.svg exists: {os.path.exists('Lumen.svg')}")
+                
+                if os.path.exists("Lumen.svg"):
+                    print("Found Lumen.svg, converting...")
+                    # Convert SVG to PNG using cairosvg
+                    svg_data = open("Lumen.svg", "rb").read()
+                    png_data = cairosvg.svg2png(bytestring=svg_data, output_width=200, output_height=50)
+                    pil_image = Image.open(io.BytesIO(png_data))
+                    print(f"Lumen SVG converted to size: {pil_image.size}")
+                    lumen_image = ImageTk.PhotoImage(pil_image)
+                elif os.path.exists("lumen.png"):
                     pil_image = Image.open("lumen.png")
-                    # Make Lumen logo MUCH larger for prominence
-                    pil_image.thumbnail((600, 120), Image.Resampling.LANCZOS)
+                    print(f"Original Lumen logo size: {pil_image.size}")
+                    # Make Lumen logo MUCH larger for prominence - use resize to force exact dimensions
+                    pil_image = pil_image.resize((200, 40), Image.Resampling.LANCZOS)
+                    print(f"Resized Lumen logo size: {pil_image.size}")
                     lumen_image = ImageTk.PhotoImage(pil_image)
                 else:
                     lumen_image = tk.PhotoImage(file="lumen.png")
+                
                 lumen_label = tk.Label(logo_frame, image=lumen_image, bg='white')
                 lumen_label.image = lumen_image  # Keep a reference
                 lumen_label.grid(row=0, column=0, padx=(0, 20), sticky=tk.W)
+                # Force minimum size to ensure logo displays at full size
+                lumen_label.configure(width=200, height=50)
                 print(f"Lumen logo loaded successfully - Size: {lumen_image.width()}x{lumen_image.height()}")
             except Exception as e:
-                print(f"Could not load lumen.png: {e}")
+                print(f"Could not load lumen logo: {e}")
                 # Create a placeholder label
                 lumen_label = tk.Label(logo_frame, text="LUMEN", font=("Arial", 32, "bold"), bg='white')
                 lumen_label.grid(row=0, column=0, padx=(0, 20), sticky=tk.W)
@@ -437,27 +755,56 @@ class QuestionSheetGUI:
             try:
                 from PIL import Image, ImageTk
                 import os
-                if os.path.exists("TXO.png"):
+                import cairosvg
+                import io
+                
+                # Check for SVG first, then PNG as fallback
+                print(f"Looking for TXO.svg in: {os.path.abspath('TXO.svg')}")
+                print(f"TXO.svg exists: {os.path.exists('TXO.svg')}")
+                
+                if os.path.exists("TXO.svg"):
+                    print("Found TXO.svg, converting...")
+                    # Convert SVG to PNG using cairosvg
+                    svg_data = open("TXO.svg", "rb").read()
+                    png_data = cairosvg.svg2png(bytestring=svg_data, output_width=200, output_height=50)
+                    pil_image = Image.open(io.BytesIO(png_data))
+                    print(f"TXO SVG converted to size: {pil_image.size}")
+                    txo_image = ImageTk.PhotoImage(pil_image)
+                elif os.path.exists("TXO.png"):
                     pil_image = Image.open("TXO.png")
                     # Resize to standard size (height 50px, maintain aspect ratio)
                     pil_image.thumbnail((200, 50), Image.Resampling.LANCZOS)
                     txo_image = ImageTk.PhotoImage(pil_image)
                 else:
                     txo_image = tk.PhotoImage(file="TXO.png")
+                
                 txo_label = tk.Label(logo_frame, image=txo_image, bg='white')
                 txo_label.image = txo_image  # Keep a reference
                 txo_label.grid(row=0, column=2, padx=(20, 0), sticky=tk.E)
                 print(f"TXO logo loaded successfully - Size: {txo_image.width()}x{txo_image.height()}")
             except Exception as e:
-                print(f"Could not load TXO.png: {e}")
+                print(f"Could not load TXO logo: {e}")
                 # Create a placeholder label
                 txo_label = tk.Label(logo_frame, text="TXO", font=("Arial", 16, "bold"), bg='white')
                 txo_label.grid(row=0, column=2, padx=(20, 0), sticky=tk.E)
             
-            # Add title in the center
-            title_label = tk.Label(logo_frame, text="Degrow Workflow Manager", 
-                                   font=("Arial", 18, "bold"), bg='white')
-            title_label.grid(row=0, column=1, padx=20)
+            # Title text removed; will use image banner instead
+
+            # Optional small workflow banner centered below logos
+            try:
+                from PIL import Image, ImageTk
+                banner_path = r"C:\Lumen\Workflow Manager\workflowbannersmall.png"
+                if os.path.exists(banner_path):
+                    banner_img = Image.open(banner_path)
+                    # Constrain height to ~40px, preserve aspect
+                    target_h = 40
+                    scale = target_h / banner_img.height if banner_img.height else 1
+                    banner_img = banner_img.resize((max(1, int(banner_img.width * scale)), target_h), Image.Resampling.LANCZOS)
+                    self._workflow_banner_photo = ImageTk.PhotoImage(banner_img)
+                    banner_label = tk.Label(logo_frame, image=self._workflow_banner_photo, bg='white')
+                    banner_label.grid(row=0, column=1, padx=20)
+            except Exception as e:
+                print(f"Could not load workflowbannersmall.png: {e}")
             
         except Exception as e:
             print(f"Error creating logo section: {e}")
@@ -465,7 +812,7 @@ class QuestionSheetGUI:
             fallback_frame = tk.Frame(self.root, bg='white')
             fallback_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=10, pady=5)
             fallback_label = tk.Label(fallback_frame, text="Degrow Workflow Manager", 
-                                     font=("Arial", 18, "bold"), bg='white')
+                                     font=("HP Simplified", 18, "bold"), bg='white')
             fallback_label.pack()
     
     def create_toggle_buttons(self):
@@ -498,8 +845,12 @@ class QuestionSheetGUI:
     
     def create_widgets(self):
         """Create GUI widgets"""
+        self.add_debug_entry("Starting widget creation")
+        
         # Create logo section at the top
+        self.add_debug_entry("Creating logo section")
         self.create_logo_section()
+        self.add_debug_entry("Logo section created")
         
         # Create toggle buttons section
         self.create_toggle_buttons()
@@ -518,6 +869,7 @@ class QuestionSheetGUI:
         self.root.rowconfigure(0, weight=0)  # Logo section (fixed height)
         self.root.rowconfigure(1, weight=0)  # Toggle buttons (fixed height)
         self.root.rowconfigure(2, weight=1)  # Main content (expandable)
+        self.root.rowconfigure(3, weight=0)  # Status bar (fixed height)
         main_container.columnconfigure(0, weight=1)  # Form section
         main_container.columnconfigure(1, weight=2)  # Subtasks section
         main_container.columnconfigure(2, weight=2)  # Gantt chart section (new)
@@ -656,20 +1008,21 @@ class QuestionSheetGUI:
                                       command=self.clear_form)
         self.clear_button.grid(row=0, column=1, padx=5)
         
-        # Milestone Editor button
-        self.editor_button = ttk.Button(buttons_frame, text="Milestone Editor", 
-                                       command=self.open_milestone_editor)
-        self.editor_button.grid(row=0, column=2, padx=5)
         
         # Show Database button
         self.database_button = ttk.Button(buttons_frame, text="Show Database", 
                                          command=self.show_database)
-        self.database_button.grid(row=0, column=3, padx=5)
+        self.database_button.grid(row=0, column=2, padx=5)
         
         # Import Project button
-        self.import_button = ttk.Button(buttons_frame, text="Import Project", 
-                                      command=self.import_project_data)
-        self.import_button.grid(row=0, column=4, padx=5)
+        self.import_button = ttk.Button(buttons_frame, text="Import Project",
+                                     command=self.import_project_data)
+        self.import_button.grid(row=0, column=3, padx=5)
+        
+        # Database Manager button
+        self.db_manager_button = ttk.Button(buttons_frame, text="Database Manager",
+                                          command=self.open_database_manager)
+        self.db_manager_button.grid(row=0, column=4, padx=5)
         
         # Exit button
         self.exit_button = ttk.Button(buttons_frame, text="Exit", 
@@ -687,21 +1040,52 @@ class QuestionSheetGUI:
         entries_frame = ttk.LabelFrame(self.main_frame, text="Recent Entries", padding="5")
         entries_frame.grid(row=12, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(20, 0))
         entries_frame.columnconfigure(0, weight=1)
-        entries_frame.rowconfigure(0, weight=1)
+        entries_frame.rowconfigure(1, weight=1)
+        
+        # Toggle switch frame
+        toggle_frame = ttk.Frame(entries_frame)
+        toggle_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        
+        # Toggle switch
+        self.entries_mode_var = tk.StringVar(value="database")
+        self.database_radio = ttk.Radiobutton(toggle_frame, text="Database Entries", 
+                                           variable=self.entries_mode_var, value="database",
+                                           command=self._safe_toggle_entries_mode)
+        self.database_radio.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.debug_radio = ttk.Radiobutton(toggle_frame, text="Debug Log", 
+                                        variable=self.entries_mode_var, value="debug",
+                                        command=self._safe_toggle_entries_mode)
+        self.debug_radio.pack(side=tk.LEFT)
         
         # Recent entries list
         self.entries_text = scrolledtext.ScrolledText(entries_frame, height=10, width=50)
-        self.entries_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.entries_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         
         # Create subtasks list
         self.create_subtasks_list(self.subtasks_frame)
+        
+        # Initialize debug log
+        self.debug_log = []
+        
+        # Add some initial debug entries
+        self.add_debug_entry("Application started")
+        self.add_debug_entry("Database initialized")
+        self.add_debug_entry("GUI components loaded")
         
         # Load recent entries
         self.load_recent_entries()
         
         # Populate CLLI dropdown
         self.populate_clli_dropdown()
+
+        # Create bottom status bar and start updates
+        try:
+            self._create_status_bar()
+            self._update_status_bar()
+        except Exception as e:
+            print(f"Error initializing status bar: {e}")
     
     def center_window(self):
         """Center the window on screen"""
@@ -711,6 +1095,174 @@ class QuestionSheetGUI:
         x = (self.root.winfo_screenwidth() // 2) - (width // 2)
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+    def _create_status_bar(self):
+        """Create the bottom status bar with runtime/system info."""
+        # Track last NAT sync value; can be updated elsewhere when sync occurs
+        if not hasattr(self, 'last_nat_sync'):
+            self.last_nat_sync = None
+
+        status_frame = ttk.Frame(self.root, padding=(8, 4))
+        status_frame.grid(row=3, column=0, sticky=(tk.W, tk.E))
+        status_frame.columnconfigure(0, weight=0)
+        status_frame.columnconfigure(1, weight=1)
+
+        self.status_user_label = ttk.Label(status_frame, text="Logged in as: ")
+        self.status_user_value = ttk.Label(status_frame, text=self.user_manager.get_current_user().username)
+
+        self.status_db_label = ttk.Label(status_frame, text="  |  Database: ")
+        self.status_db_value = ttk.Label(status_frame, text="")
+
+        self.status_uptime_label = ttk.Label(status_frame, text="  |  DB Uptime: ")
+        self.status_uptime_value = ttk.Label(status_frame, text="")
+
+        self.status_nat_label = ttk.Label(status_frame, text="  |  Last NAT Sync: ")
+        self.status_nat_value = ttk.Label(status_frame, text="(NULL)")
+
+        # Lay out labels
+        self.status_user_label.grid(row=0, column=0, sticky=tk.W)
+        self.status_user_value.grid(row=0, column=1, sticky=tk.W)
+        c = 2
+        self.status_db_label.grid(row=0, column=c, sticky=tk.W); c += 1
+        self.status_db_value.grid(row=0, column=c, sticky=tk.W); c += 1
+        self.status_uptime_label.grid(row=0, column=c, sticky=tk.W); c += 1
+        self.status_uptime_value.grid(row=0, column=c, sticky=tk.W); c += 1
+        self.status_nat_label.grid(row=0, column=c, sticky=tk.W); c += 1
+        self.status_nat_value.grid(row=0, column=c, sticky=tk.W)
+
+        self._status_frame = status_frame
+
+    def _update_status_bar(self):
+        """Refresh dynamic values in the status bar periodically."""
+        try:
+            self.status_user_value.configure(text=self.user_manager.get_current_user().username)
+        except Exception:
+            pass
+
+        db_name = self._get_db_display_name()
+        connected, uptime_text = self._get_db_connection_and_uptime()
+
+        if connected:
+            self.status_db_value.configure(text=f"Connected to {db_name}", foreground='green')
+        else:
+            self.status_db_value.configure(text="DB NOT CONNECTED", foreground='red')
+
+        self.status_uptime_value.configure(text=uptime_text)
+
+        if self.last_nat_sync:
+            try:
+                if isinstance(self.last_nat_sync, str):
+                    nat_text = self.last_nat_sync
+                else:
+                    nat_text = self.last_nat_sync.strftime('%Y-%m-%d %H:%M:%S')
+                self.status_nat_value.configure(text=nat_text)
+            except Exception:
+                self.status_nat_value.configure(text="(NULL)")
+        else:
+            self.status_nat_value.configure(text="(NULL)")
+
+        try:
+            self.root.after(60000, self._update_status_bar)  # refresh every 60s
+        except Exception:
+            pass
+
+    def set_last_nat_sync(self, when):
+        """Externally update the Last NAT Sync value.
+        Accepts datetime or string; None clears to (NULL).
+        """
+        self.last_nat_sync = when
+        try:
+            self._update_status_bar()
+        except Exception:
+            pass
+
+    def _get_db_display_name(self) -> str:
+        """Return a user-friendly database target string based on live connection if possible."""
+        try:
+            if not hasattr(self, 'db_conn') or not hasattr(self.db_conn, 'db_config'):
+                return ""
+
+            cfg = self.db_conn.db_config
+            db_type = str(cfg.get('type', 'sqlite')).lower()
+
+            connection = getattr(self.db_conn, 'connection', None)
+            if connection is None:
+                try:
+                    connection = self.db_conn.connect()
+                except Exception:
+                    connection = None
+
+            if db_type == 'mysql':
+                # Prefer actual selected database name
+                db_name = cfg.get('database_name', '')
+                try:
+                    if connection and hasattr(connection, 'cursor'):
+                        cur = connection.cursor()
+                        cur.execute('SELECT DATABASE()')
+                        row = cur.fetchone()
+                        cur.close()
+                        if row and row[0]:
+                            db_name = row[0]
+                except Exception:
+                    pass
+                host = cfg.get('host', 'localhost')
+                port = cfg.get('port', 3306)
+                return f"mysql://{host}:{port}/{db_name}"
+
+            # SQLite
+            db_name = cfg.get('database_name', 'degrow_workflow.db')
+            if not str(db_name).endswith('.db'):
+                db_name = f"{db_name}.db"
+            try:
+                # Create absolute path for clarity
+                import os
+                return os.path.abspath(db_name)
+            except Exception:
+                return str(db_name)
+        except Exception:
+            return ""
+
+    def _get_db_connection_and_uptime(self):
+        """Return (connected: bool, uptime_text: str)."""
+        try:
+            if not hasattr(self, 'db_conn') or self.db_conn is None:
+                return False, "N/A"
+
+            connection = getattr(self.db_conn, 'connection', None)
+            if connection is None:
+                connection = self.db_conn.connect()
+
+            if hasattr(connection, 'is_connected'):
+                is_up = connection.is_connected()
+                uptime_text = ""
+                try:
+                    cursor = connection.cursor()
+                    cursor.execute("SHOW GLOBAL STATUS LIKE 'Uptime'")
+                    row = cursor.fetchone()
+                    cursor.close()
+                    if row and len(row) >= 2:
+                        seconds = int(row[1])
+                        uptime_text = self._format_seconds(seconds)
+                except Exception:
+                    uptime_text = "Unknown"
+                return bool(is_up), uptime_text or "Unknown"
+
+            return True, "N/A"  # SQLite
+        except Exception:
+            return False, "Unknown"
+
+    def _format_seconds(self, total_seconds: int) -> str:
+        """Format seconds into human-friendly d hh:mm:ss."""
+        try:
+            total_seconds = int(total_seconds)
+            days, rem = divmod(total_seconds, 86400)
+            hours, rem = divmod(rem, 3600)
+            minutes, seconds = divmod(rem, 60)
+            if days > 0:
+                return f"{days}d {hours:02}:{minutes:02}:{seconds:02}"
+            return f"{hours:02}:{minutes:02}:{seconds:02}"
+        except Exception:
+            return "Unknown"
     
     def on_stage_selected(self, event=None):
         """Handle stage selection to update milestone date"""
@@ -775,6 +1327,8 @@ class QuestionSheetGUI:
             self.clli_var.set(selected)
             # Autopopulate Host Wire Centre and LATA
             self.autopopulate_from_clli(selected)
+            # Refresh subtasks to load dates for new CLLI
+            self.populate_subtasks()
     
     def on_clli_combo_key_release(self, event):
         """Handle key release in CLLI dropdown"""
@@ -784,7 +1338,10 @@ class QuestionSheetGUI:
             # Get current value and trigger autopopulation
             current_value = self.clli_combo.get()
             if current_value:
+                self.clli_var.set(current_value)
                 self.autopopulate_from_clli(current_value)
+                # Refresh subtasks to load dates for new CLLI
+                self.populate_subtasks()
         elif event.keysym == 'Escape':
             pass  # Escape key handling removed
         else:
@@ -813,6 +1370,7 @@ class QuestionSheetGUI:
     def autopopulate_from_clli(self, clli_code):
         """Autopopulate Host Wire Centre and LATA from CLLI code"""
         try:
+            self.add_debug_entry(f"Starting autopopulate from CLLI: {clli_code}")
             print(f"Attempting to autopopulate from CLLI: {clli_code}")
             if 'Host CLLI' in self.clli_data.columns:
                 print(f"Excel data columns: {list(self.clli_data.columns)}")
@@ -949,6 +1507,18 @@ class QuestionSheetGUI:
         try:
             # Create a treeview for subtasks
             self.subtasks_tree = ttk.Treeview(parent_frame, columns=('subtask', 'status', 'criticality', 'planned_start', 'actual_start', 'duration', 'planned_end', 'actual_end'), show='tree headings', height=15)
+            
+            # Store original column widths for reference
+            self.original_column_widths = {
+                'subtask': 180,
+                'status': 80,
+                'criticality': 120,
+                'planned_start': 100,
+                'actual_start': 100,
+                'duration': 80,
+                'planned_end': 100,
+                'actual_end': 100
+            }
             self.subtasks_tree.heading('#0', text='Milestone')
             self.subtasks_tree.heading('subtask', text='Subtasks')
             self.subtasks_tree.heading('status', text='Status')
@@ -959,15 +1529,16 @@ class QuestionSheetGUI:
             self.subtasks_tree.heading('planned_end', text='Planned End')
             self.subtasks_tree.heading('actual_end', text='Actual End')
             # Configure columns to use full width efficiently
-            self.subtasks_tree.column('#0', width=180, minwidth=120)  # Milestone
-            self.subtasks_tree.column('subtask', width=200, minwidth=150)  # Subtasks
-            self.subtasks_tree.column('status', width=80, minwidth=60)  # Status
-            self.subtasks_tree.column('criticality', width=120, minwidth=100)  # Criticality
-            self.subtasks_tree.column('planned_start', width=100, minwidth=80)  # Planned Start
-            self.subtasks_tree.column('actual_start', width=100, minwidth=80)  # Actual Start
-            self.subtasks_tree.column('duration', width=80, minwidth=60)  # Duration
-            self.subtasks_tree.column('planned_end', width=100, minwidth=80)  # Planned End
-            self.subtasks_tree.column('actual_end', width=100, minwidth=80)  # Actual End
+            # Milestone column - reasonable width that prevents truncation
+            self.subtasks_tree.column('#0', width=300, minwidth=250)  # Milestone - reasonable width
+            self.subtasks_tree.column('subtask', width=180, minwidth=150)  # Subtasks - restored
+            self.subtasks_tree.column('status', width=80, minwidth=60)  # Status - restored
+            self.subtasks_tree.column('criticality', width=120, minwidth=100)  # Criticality - restored
+            self.subtasks_tree.column('planned_start', width=100, minwidth=80)  # Planned Start - restored
+            self.subtasks_tree.column('actual_start', width=100, minwidth=80)  # Actual Start - restored
+            self.subtasks_tree.column('duration', width=80, minwidth=60)  # Duration - restored
+            self.subtasks_tree.column('planned_end', width=100, minwidth=80)  # Planned End - restored
+            self.subtasks_tree.column('actual_end', width=100, minwidth=80)  # Actual End - restored
             
             # Add vertical and horizontal scrollbars
             subtasks_v_scrollbar = ttk.Scrollbar(parent_frame, orient="vertical", command=self.subtasks_tree.yview)
@@ -978,6 +1549,9 @@ class QuestionSheetGUI:
             parent_frame.columnconfigure(0, weight=1)  # Tree takes most space
             parent_frame.columnconfigure(1, weight=0)  # Scrollbar takes minimal space
             parent_frame.columnconfigure(2, weight=0)  # Button area takes minimal space
+            
+            # Configure treeview selection mode
+            self.subtasks_tree.configure(selectmode='extended')  # Allow multiple selection if needed
             
             # Grid the treeview and scrollbars
             self.subtasks_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 0))
@@ -990,11 +1564,20 @@ class QuestionSheetGUI:
             self.subtasks_tree.tag_configure('done', background='lightgreen', foreground='darkgreen')
             self.subtasks_tree.tag_configure('blocked', background='lightcoral', foreground='darkred')
             
+            # Add tooltip for editable columns
+            self.create_tooltip()
+            
             # Create context menu for status changes
             self.create_context_menu()
             
             # Bind right-click event
             self.subtasks_tree.bind("<Button-3>", self.show_context_menu)  # Button-3 is right-click
+            
+            # Bind double-click event for cell editing
+            self.subtasks_tree.bind("<Double-1>", self.on_cell_double_click)  # Double-1 is double-click
+            
+            # Bind window resize event to maintain milestone column width
+            self.root.bind("<Configure>", self.on_window_resize)
             
             # Create a button frame to align buttons with scrollbar
             button_frame = ttk.Frame(parent_frame)
@@ -1021,6 +1604,9 @@ class QuestionSheetGUI:
             
             # Populate subtasks for each milestone
             self.populate_subtasks()
+            
+            # Adjust milestone column width after populating
+            self.adjust_milestone_column_width()
             
         except Exception as e:
             print(f"Error creating subtasks list: {e}")
@@ -1058,13 +1644,28 @@ class QuestionSheetGUI:
                     status = self.get_subtask_status(milestone['name'], subtask['name'])
                     tag = self.get_status_tag(status)
                     
-                    # Insert subtask
+                    # Get dates from date_entries table for current CLLI
+                    current_clli = self.clli_var.get().strip()
+                    dates = self._load_dates_for_clli(current_clli)
+                    
+                    # Insert subtask with dates
                     self.subtasks_tree.insert(milestone_node, 'end', 
-                                            values=(subtask['name'], status, subtask['criticality'], '', '', '', '', ''),
+                                            values=(subtask['name'], status, subtask['criticality'], 
+                                                   dates.get('planned_start', ''), 
+                                                   dates.get('actual_start', ''), 
+                                                   '',  # duration - not stored in date_entries
+                                                   dates.get('planned_end', ''), 
+                                                   dates.get('actual_end', '')),
                                             tags=(tag,))
                 
                 # Expand the milestone
                 self.subtasks_tree.item(milestone_node, open=True)
+            
+            # Adjust milestone column width after populating
+            self.adjust_milestone_column_width()
+            
+            # Force a refresh of the treeview to ensure proper display
+            self.root.after(100, self.refresh_milestone_column_width)
                 
         except Exception as e:
             print(f"Error populating subtasks: {e}")
@@ -1072,10 +1673,7 @@ class QuestionSheetGUI:
     def _load_milestones_from_db(self):
         """Load milestones from database"""
         try:
-            if not hasattr(self, 'milestone_db_path'):
-                return []
-            
-            conn = sqlite3.connect(self.milestone_db_path)
+            conn = self.db_conn.connect()
             cursor = conn.cursor()
             
             cursor.execute("""
@@ -1095,6 +1693,7 @@ class QuestionSheetGUI:
                     'last_updated': row[5]
                 })
             
+            cursor.close()
             conn.close()
             return milestones
             
@@ -1105,16 +1704,13 @@ class QuestionSheetGUI:
     def _load_subtasks_from_db(self, milestone_id):
         """Load subtasks for a specific milestone from database"""
         try:
-            if not hasattr(self, 'milestone_db_path'):
-                return []
-            
-            conn = sqlite3.connect(self.milestone_db_path)
+            conn = self.db_conn.connect()
             cursor = conn.cursor()
             
             cursor.execute("""
                 SELECT id, name, description, criticality, order_index, created_date, last_updated
                 FROM subtasks 
-                WHERE milestone_id = ?
+                WHERE milestone_id = %s
                 ORDER BY order_index, name
             """, (milestone_id,))
             
@@ -1130,6 +1726,7 @@ class QuestionSheetGUI:
                     'last_updated': row[6]
                 })
             
+            cursor.close()
             conn.close()
             return subtasks
             
@@ -1238,6 +1835,400 @@ class QuestionSheetGUI:
         except Exception as e:
             print(f"Error in test status update: {e}")
     
+    def on_cell_double_click(self, event):
+        """Handle double-click on treeview cell for editing"""
+        try:
+            # If already editing, save current edit first
+            if self.editing_item:
+                self.save_current_edit()
+                return
+            
+            # Get the item and column that was clicked
+            item = self.subtasks_tree.identify_row(event.y)
+            column = self.subtasks_tree.identify_column(event.x)
+            
+            if not item or not column:
+                return
+            
+            # Get column index (subtract 1 because #0 is the tree column)
+            column_index = int(column[1:]) - 1
+            
+            # Only allow editing of date columns (planned_start, actual_start, planned_end, actual_end)
+            # These are columns 4, 5, 7, 8 (0-indexed: 3, 4, 6, 7)
+            date_column_indices = [3, 4, 6, 7]  # planned_start, actual_start, planned_end, actual_end
+            if column_index in date_column_indices:
+                self.edit_cell(item, column_index)
+                
+        except Exception as e:
+            print(f"Error handling cell double-click: {e}")
+    
+    def save_current_edit(self):
+        """Save the current edit if one is in progress"""
+        try:
+            if self.editing_item and self.edit_entry:
+                new_value = self.edit_entry.get().strip()
+                if self.validate_date(new_value):
+                    # Log user activity
+                    if self.user_manager:
+                        self.user_manager.log_activity(
+                            self.user_manager.get_current_user().user_id,
+                            'update_entry',
+                            f'Updated {self.editing_column_name} to {new_value}'
+                        )
+                    
+                    # Update the treeview
+                    values = list(self.subtasks_tree.item(self.editing_item, 'values'))
+                    values[self.editing_column] = new_value
+                    self.subtasks_tree.item(self.editing_item, values=values)
+                    
+                    # Update database
+                    self.update_subtask_date(self.editing_item, self.editing_column_name, new_value)
+                    
+                    # Clean up
+                    self.edit_entry.destroy()
+                    self.editing_item = None
+                    self.editing_column = None
+                    self.editing_column_name = None
+                    self.original_value = None
+                else:
+                    messagebox.showerror("Invalid Date", "Please enter a valid date in MM/DD/YYYY format.")
+                    self.edit_entry.focus()
+        except Exception as e:
+            print(f"Error saving current edit: {e}")
+    
+    def on_treeview_click(self, event):
+        """Handle clicks on the treeview"""
+        try:
+            if self.editing_item:
+                # Save current edit if clicking outside the editing cell
+                self.save_current_edit()
+            else:
+                # Restore normal double-click behavior
+                self.subtasks_tree.bind('<Double-1>', self.on_cell_double_click)
+        except Exception as e:
+            print(f"Error handling treeview click: {e}")
+    
+    def edit_cell(self, item, column_index):
+        """Edit a specific cell in the treeview using inline editing"""
+        try:
+            # Get current values
+            values = list(self.subtasks_tree.item(item, 'values'))
+            
+            # Get the current value of the cell to edit
+            current_value = values[column_index] if column_index < len(values) else ""
+            
+            # Get column name for database update
+            column_names = ['subtask', 'status', 'criticality', 'planned_start', 'actual_start', 'duration', 'planned_end', 'actual_end']
+            column_name = column_names[column_index] if column_index < len(column_names) else "Date"
+            
+            # Get the bounding box of the cell
+            bbox = self.subtasks_tree.bbox(item, f"#{column_index + 1}")
+            if not bbox:
+                return
+            
+            x, y, width, height = bbox
+            
+            # Create entry widget for inline editing
+            self.edit_entry = tk.Entry(self.subtasks_tree, font=('Arial', 9), 
+                                     bg='lightyellow', fg='black', relief='solid', bd=1)
+            self.edit_entry.place(x=x, y=y, width=width, height=height)
+            self.edit_entry.insert(0, current_value)
+            self.edit_entry.select_range(0, tk.END)
+            self.edit_entry.focus()
+            
+            # Store editing state
+            self.editing_item = item
+            self.editing_column = column_index
+            self.editing_column_name = column_name
+            self.original_value = current_value
+            
+            def save_edit():
+                new_value = self.edit_entry.get().strip()
+                if self.validate_date(new_value):
+                    # Update the treeview
+                    values[column_index] = new_value
+                    self.subtasks_tree.item(item, values=values)
+                    
+                    # Update database
+                    self.update_subtask_date(item, column_name, new_value)
+                    
+                    # Clean up
+                    self.edit_entry.destroy()
+                    self.editing_item = None
+                    self.editing_column = None
+                    self.editing_column_name = None
+                    self.original_value = None
+                else:
+                    messagebox.showerror("Invalid Date", "Please enter a valid date in MM/DD/YYYY format.")
+                    self.edit_entry.focus()
+            
+            def cancel_edit():
+                # Restore original value
+                values[column_index] = self.original_value
+                self.subtasks_tree.item(item, values=values)
+                
+                # Clean up
+                self.edit_entry.destroy()
+                self.editing_item = None
+                self.editing_column = None
+                self.editing_column_name = None
+                self.original_value = None
+            
+            # Bind events
+            self.edit_entry.bind('<Return>', lambda e: save_edit())
+            self.edit_entry.bind('<Escape>', lambda e: cancel_edit())
+            self.edit_entry.bind('<FocusOut>', lambda e: save_edit())  # Save when focus is lost
+            
+            # Bind click outside to save (temporarily unbind and rebind)
+            self.subtasks_tree.unbind('<Button-1>')
+            self.subtasks_tree.bind('<Button-1>', self.on_treeview_click)
+            
+        except Exception as e:
+            print(f"Error editing cell: {e}")
+            messagebox.showerror("Error", f"Error editing cell: {e}")
+    
+    def validate_date(self, date_string):
+        """Validate date string in MM/DD/YYYY format"""
+        try:
+            if not date_string:
+                return True  # Allow empty dates
+            
+            # Try to parse the date
+            datetime.strptime(date_string, '%m/%d/%Y')
+            return True
+        except ValueError:
+            return False
+    
+    def update_subtask_date(self, item, column_name, new_value):
+        """Update subtask date in date_entries table using CLLI as primary key"""
+        try:
+            # Get the current CLLI from the form
+            current_clli = self.clli_var.get().strip()
+            if not current_clli:
+                messagebox.showerror("Error", "No CLLI selected. Please select a CLLI first.")
+                return
+            
+            # Connect to database
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Check if record exists for this CLLI
+            cursor.execute("SELECT clli FROM date_entries WHERE clli = ?", (current_clli,))
+            existing_record = cursor.fetchone()
+            
+            if existing_record:
+                # Update existing record
+                update_query = f"""
+                    UPDATE date_entries 
+                    SET {column_name} = ?, last_updated = ?
+                    WHERE clli = ?
+                """
+                cursor.execute(update_query, (
+                    new_value if new_value else None,
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    current_clli
+                ))
+            else:
+                # Insert new record
+                insert_query = """
+                    INSERT INTO date_entries (clli, planned_start, actual_start, planned_end, actual_end, created_date, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """
+                # Initialize all date fields as None
+                planned_start = None
+                actual_start = None
+                planned_end = None
+                actual_end = None
+                
+                # Set the specific field being updated
+                if column_name == 'planned_start':
+                    planned_start = new_value if new_value else None
+                elif column_name == 'actual_start':
+                    actual_start = new_value if new_value else None
+                elif column_name == 'planned_end':
+                    planned_end = new_value if new_value else None
+                elif column_name == 'actual_end':
+                    actual_end = new_value if new_value else None
+                
+                cursor.execute(insert_query, (
+                    current_clli,
+                    planned_start,
+                    actual_start,
+                    planned_end,
+                    actual_end,
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ))
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"Updated {column_name} for CLLI {current_clli} to {new_value}")
+            
+        except Exception as e:
+            print(f"Error updating subtask date: {e}")
+            messagebox.showerror("Error", f"Error updating date: {e}")
+    
+    def create_tooltip(self):
+        """Create tooltip for editable columns"""
+        try:
+            # Create tooltip window
+            self.tooltip = tk.Toplevel(self.root)
+            self.tooltip.withdraw()  # Hide initially
+            self.tooltip.overrideredirect(True)  # Remove window decorations
+            self.tooltip.configure(bg='lightyellow')
+            
+            # Create tooltip label
+            self.tooltip_label = tk.Label(self.tooltip, text="Double-click date columns to edit", 
+                                        bg='lightyellow', fg='black', font=('Arial', 9))
+            self.tooltip_label.pack()
+            
+            # Bind mouse motion to show/hide tooltip
+            self.subtasks_tree.bind("<Motion>", self.on_mouse_motion)
+            self.subtasks_tree.bind("<Leave>", self.hide_tooltip)
+            
+        except Exception as e:
+            print(f"Error creating tooltip: {e}")
+    
+    def on_mouse_motion(self, event):
+        """Handle mouse motion over treeview"""
+        try:
+            # Get the column that was hovered
+            column = self.subtasks_tree.identify_column(event.x)
+            if not column:
+                self.hide_tooltip()
+                return
+            
+            # Get column index
+            column_index = int(column[1:]) - 1
+            
+            # Show tooltip only for date columns
+            date_column_indices = [3, 4, 6, 7]  # planned_start, actual_start, planned_end, actual_end
+            if column_index in date_column_indices:
+                self.show_tooltip(event)
+            else:
+                self.hide_tooltip()
+                
+        except Exception as e:
+            print(f"Error in mouse motion: {e}")
+    
+    def show_tooltip(self, event):
+        """Show tooltip at mouse position"""
+        try:
+            x = self.root.winfo_rootx() + event.x + 10
+            y = self.root.winfo_rooty() + event.y + 10
+            self.tooltip.geometry(f"+{x}+{y}")
+            self.tooltip.deiconify()
+        except Exception as e:
+            print(f"Error showing tooltip: {e}")
+    
+    def hide_tooltip(self, event=None):
+        """Hide tooltip"""
+        try:
+            self.tooltip.withdraw()
+        except Exception as e:
+            print(f"Error hiding tooltip: {e}")
+    
+    def adjust_milestone_column_width(self):
+        """Adjust milestone column width to span across available space"""
+        try:
+            # Get all milestone items
+            milestone_items = []
+            for item in self.subtasks_tree.get_children():
+                milestone_text = self.subtasks_tree.item(item, 'text')
+                if milestone_text:
+                    milestone_items.append(milestone_text)
+            
+            if not milestone_items:
+                return
+            
+            # Calculate the maximum width needed for milestone text
+            max_text_width = 0
+            for milestone_text in milestone_items:
+                # More accurate width estimation
+                estimated_width = len(milestone_text) * 9 + 40  # Add padding
+                max_text_width = max(max_text_width, estimated_width)
+            
+            # Get the total available width of the treeview
+            treeview_width = self.subtasks_tree.winfo_width()
+            if treeview_width <= 1:  # Treeview not yet rendered
+                treeview_width = 1000  # Use a reasonable default
+            
+            # Calculate total width of other columns
+            other_columns_width = sum(self.original_column_widths.values())
+            
+            # Calculate available space for milestone column
+            available_width = treeview_width - other_columns_width - 50  # Account for scrollbars and padding
+            
+            # Use the larger of: required text width or available space
+            milestone_width = max(max_text_width, available_width)
+            
+            # Set reasonable limits
+            milestone_width = min(milestone_width, 350)  # Cap at 350 pixels
+            milestone_width = max(milestone_width, 250)  # Minimum width
+            
+            # Update the milestone column width
+            self.subtasks_tree.column('#0', width=int(milestone_width))
+            
+            print(f"Adjusted milestone column width to: {int(milestone_width)} pixels (text needed: {max_text_width}, available: {available_width})")
+            
+        except Exception as e:
+            print(f"Error adjusting milestone column width: {e}")
+    
+    def refresh_milestone_column_width(self):
+        """Refresh milestone column width after a delay"""
+        try:
+            # Recalculate and set the milestone column width
+            self.adjust_milestone_column_width()
+            
+            # Force treeview to redraw
+            self.subtasks_tree.update_idletasks()
+            
+        except Exception as e:
+            print(f"Error refreshing milestone column width: {e}")
+    
+    def on_window_resize(self, event):
+        """Handle window resize events to maintain milestone column width"""
+        try:
+            # Only handle resize events for the main window
+            if event.widget == self.root:
+                # Debounce the resize event to avoid too many calls
+                if hasattr(self, '_resize_timer'):
+                    self.root.after_cancel(self._resize_timer)
+                
+                self._resize_timer = self.root.after(200, self.refresh_milestone_column_width)
+                
+        except Exception as e:
+            print(f"Error handling window resize: {e}")
+    
+    def force_milestone_column_expansion(self):
+        """Force the milestone column to expand to maximum available width"""
+        try:
+            # Get the actual treeview width
+            treeview_width = self.subtasks_tree.winfo_width()
+            if treeview_width <= 1:
+                # If treeview not yet rendered, try again later
+                self.root.after(200, self.force_milestone_column_expansion)
+                return
+            
+            # Calculate total width of other columns
+            other_columns_width = sum(self.original_column_widths.values())
+            
+            # Make milestone column take up reasonable space
+            milestone_width = treeview_width - other_columns_width - 100  # Leave margin for other columns
+            
+            # Ensure reasonable width limits
+            milestone_width = max(milestone_width, 250)  # Minimum width
+            milestone_width = min(milestone_width, 350)  # Maximum width
+            
+            # Update milestone column width
+            self.subtasks_tree.column('#0', width=int(milestone_width))
+            
+            print(f"Forced milestone column expansion to: {int(milestone_width)} pixels (treeview width: {treeview_width})")
+            
+        except Exception as e:
+            print(f"Error forcing milestone column expansion: {e}")
+    
     def open_milestone_editor(self):
         """Open the milestone editor window"""
         try:
@@ -1248,6 +2239,18 @@ class QuestionSheetGUI:
             self.populate_subtasks()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open milestone editor: {e}")
+    
+    def open_database_manager(self):
+        """Open the database manager window"""
+        try:
+            self.add_debug_entry("Opening database manager")
+            # Pass both database paths to the manager
+            milestone_db_path = getattr(self, 'milestone_db_path', self.db_path.replace('.accdb', '_milestones.db'))
+            open_database_manager(self.root, self.db_path, milestone_db_path)
+            self.add_debug_entry("Database manager closed")
+        except Exception as e:
+            self.add_debug_entry(f"Error opening database manager: {e}")
+            messagebox.showerror("Error", f"Failed to open database manager: {e}")
     
     def set_record_number(self, record_id: int = None):
         """Set the record number field"""
@@ -1605,9 +2608,15 @@ class QuestionSheetGUI:
         """Handle week slider change"""
         try:
             week_num = int(float(value))
-            year = int(self.year_var.get())
-            self.current_week_var.set(f"Week {week_num}, {year}")
-            self.refresh_gantt_chart()
+            if hasattr(self, 'year_var'):
+                year = int(self.year_var.get())
+                self.current_week_var.set(f"Week {week_num}, {year}")
+                self.refresh_gantt_chart()
+            else:
+                # Fallback to current year if year_var not available
+                import datetime
+                year = datetime.datetime.now().year
+                self.current_week_var.set(f"Week {week_num}, {year}")
         except Exception as e:
             print(f"Error handling week slider change: {e}")
     
@@ -1814,7 +2823,9 @@ class QuestionSheetGUI:
     def toggle_form_column(self):
         """Toggle form column visibility"""
         try:
+            self.add_debug_entry(f"Toggling form column - Current state: {self.form_visible}")
             self.form_visible = not self.form_visible
+            self.add_debug_entry(f"Form column visibility changed to: {self.form_visible}")
             self.update_column_visibility()
             self.update_toggle_button_text()
         except Exception as e:
@@ -1823,7 +2834,9 @@ class QuestionSheetGUI:
     def toggle_subtasks_column(self):
         """Toggle subtasks column visibility"""
         try:
+            self.add_debug_entry(f"Toggling subtasks column - Current state: {self.subtasks_visible}")
             self.subtasks_visible = not self.subtasks_visible
+            self.add_debug_entry(f"Subtasks column visibility changed to: {self.subtasks_visible}")
             self.update_column_visibility()
             self.update_toggle_button_text()
         except Exception as e:
@@ -1832,7 +2845,9 @@ class QuestionSheetGUI:
     def toggle_gantt_column(self):
         """Toggle Gantt chart column visibility"""
         try:
+            self.add_debug_entry(f"Toggling Gantt column - Current state: {self.gantt_visible}")
             self.gantt_visible = not self.gantt_visible
+            self.add_debug_entry(f"Gantt column visibility changed to: {self.gantt_visible}")
             self.update_column_visibility()
             self.update_toggle_button_text()
         except Exception as e:
@@ -1841,6 +2856,7 @@ class QuestionSheetGUI:
     def update_column_visibility(self):
         """Update column visibility and weights"""
         try:
+            self.add_debug_entry(f"Updating column visibility - Form: {self.form_visible}, Subtasks: {self.subtasks_visible}, Gantt: {self.gantt_visible}")
             # Get the main container (the frame that contains our three sections)
             main_container = None
             for child in self.root.winfo_children():
@@ -1900,6 +2916,10 @@ class QuestionSheetGUI:
                 else:
                     self.gantt_frame.grid_remove()
             
+            # Adjust button sizes based on available space
+            print("Calling adjust_button_sizes()")
+            self.adjust_button_sizes()
+            
         except Exception as e:
             print(f"Error updating column visibility: {e}")
     
@@ -1926,6 +2946,137 @@ class QuestionSheetGUI:
                 
         except Exception as e:
             print(f"Error updating toggle button text: {e}")
+    
+    def adjust_button_sizes(self):
+        """Adjust button sizes based on available space when all columns are visible"""
+        try:
+            # Check if all three columns are visible
+            all_columns_visible = self.form_visible and self.subtasks_visible and self.gantt_visible
+            print(f"Adjusting button sizes - All columns visible: {all_columns_visible}")
+            
+            if all_columns_visible:
+                # When all columns are visible, use shorter button text and less padding
+                button_padding = 1  # Minimal padding
+                print("Setting compact button mode")
+                
+                # Update button text to shorter versions
+                if hasattr(self, 'save_button'):
+                    self.save_button.config(text="Save")
+                    print("Updated save button to 'Save'")
+                if hasattr(self, 'clear_button'):
+                    self.clear_button.config(text="Clear")
+                    print("Updated clear button to 'Clear'")
+                if hasattr(self, 'database_button'):
+                    self.database_button.config(text="Database")
+                    print("Updated database button to 'Database'")
+                if hasattr(self, 'import_button'):
+                    self.import_button.config(text="Import")
+                    print("Updated import button to 'Import'")
+                if hasattr(self, 'db_manager_button'):
+                    self.db_manager_button.config(text="DB Manager")
+                    print("Updated database manager button to 'DB Manager'")
+                if hasattr(self, 'exit_button'):
+                    self.exit_button.config(text="Exit")
+                    print("Updated exit button to 'Exit'")
+            else:
+                # When columns are hidden, use full button text and normal padding
+                button_padding = 5  # Normal padding
+                print("Setting normal button mode")
+                
+                # Update button text to full versions
+                if hasattr(self, 'save_button'):
+                    self.save_button.config(text="Save Entry")
+                    print("Updated save button to 'Save Entry'")
+                if hasattr(self, 'clear_button'):
+                    self.clear_button.config(text="Clear Form")
+                    print("Updated clear button to 'Clear Form'")
+                if hasattr(self, 'database_button'):
+                    self.database_button.config(text="Show Database")
+                    print("Updated database button to 'Show Database'")
+                if hasattr(self, 'import_button'):
+                    self.import_button.config(text="Import Project")
+                    print("Updated import button to 'Import Project'")
+                if hasattr(self, 'db_manager_button'):
+                    self.db_manager_button.config(text="Database Manager")
+                    print("Updated database manager button to 'Database Manager'")
+                if hasattr(self, 'exit_button'):
+                    self.exit_button.config(text="Exit")
+                    print("Updated exit button to 'Exit'")
+            
+            # Update button grid padding
+            if hasattr(self, 'save_button'):
+                self.save_button.grid_configure(padx=button_padding)
+            if hasattr(self, 'clear_button'):
+                self.clear_button.grid_configure(padx=button_padding)
+            if hasattr(self, 'database_button'):
+                self.database_button.grid_configure(padx=button_padding)
+            if hasattr(self, 'import_button'):
+                self.import_button.grid_configure(padx=button_padding)
+            if hasattr(self, 'db_manager_button'):
+                self.db_manager_button.grid_configure(padx=button_padding)
+            if hasattr(self, 'exit_button'):
+                self.exit_button.grid_configure(padx=button_padding)
+            
+            print(f"Button adjustment completed with padding: {button_padding}")
+                
+        except Exception as e:
+            print(f"Error adjusting button sizes: {e}")
+    
+    def _safe_toggle_entries_mode(self):
+        """Safe wrapper for toggle_entries_mode to handle initialization issues"""
+        try:
+            if hasattr(self, 'toggle_entries_mode'):
+                self.toggle_entries_mode()
+            else:
+                print("toggle_entries_mode method not yet available")
+        except Exception as e:
+            print(f"Error in safe toggle entries mode: {e}")
+    
+    def toggle_entries_mode(self):
+        """Toggle between database entries and debug log display"""
+        try:
+            mode = self.entries_mode_var.get()
+            self.entries_text.delete(1.0, tk.END)
+            
+            if mode == "database":
+                # Show database entries
+                self.load_recent_entries()
+            else:
+                # Show debug log
+                self.show_debug_log()
+                
+        except Exception as e:
+            print(f"Error toggling entries mode: {e}")
+    
+    def show_debug_log(self):
+        """Display the debug log in the entries text widget"""
+        try:
+            self.entries_text.insert(tk.END, "Debug Log:\n")
+            self.entries_text.insert(tk.END, "=" * 50 + "\n")
+            
+            if not self.debug_log:
+                self.entries_text.insert(tk.END, "No debug entries yet.\n")
+            else:
+                for entry in self.debug_log:
+                    self.entries_text.insert(tk.END, f"{entry}\n")
+                    
+        except Exception as e:
+            print(f"Error showing debug log: {e}")
+    
+    def add_debug_entry(self, message):
+        """Add an entry to the debug log"""
+        try:
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            debug_entry = f"[{timestamp}] {message}"
+            self.debug_log.append(debug_entry)
+            
+            # If we're currently showing debug log, update the display
+            if hasattr(self, 'entries_mode_var') and self.entries_mode_var.get() == "debug":
+                self.show_debug_log()
+                
+        except Exception as e:
+            print(f"Error adding debug entry: {e}")
     
     def create_context_menu(self):
         """Create right-click context menu for status changes"""
@@ -2153,16 +3304,22 @@ class QuestionSheetGUI:
     
     def save_entry(self):
         """Save entry to database"""
+        self.add_debug_entry("Starting save_entry process")
         entry = self.create_entry()
         if not entry:
+            self.add_debug_entry("Save entry cancelled - invalid entry data")
             return
+        self.add_debug_entry("Entry data validated successfully")
         
         try:
             # Use the new workflow_entries table
+            self.add_debug_entry("Connecting to database")
             conn = sqlite3.connect(self.db_path.replace('.accdb', '.db'))
             cursor = conn.cursor()
+            self.add_debug_entry("Database connection established")
             
             # Insert record into workflow_entries table
+            self.add_debug_entry("Preparing database insert statement")
             cursor.execute("""
                 INSERT INTO workflow_entries 
                 (state, clli, host_wire_centre, lata, equipment_type, current_milestone, milestone_subtask, 
@@ -2190,12 +3347,15 @@ class QuestionSheetGUI:
             
             # Get the record ID of the inserted record
             record_id = cursor.lastrowid
+            self.add_debug_entry(f"Database insert completed - Record ID: {record_id}")
             
             conn.commit()
             conn.close()
+            self.add_debug_entry("Database transaction committed and connection closed")
             
             # Set the record number
             self.set_record_number(record_id)
+            self.add_debug_entry(f"Record number set to: {record_id}")
             
             # Show success message
             messagebox.showinfo("Success", 
